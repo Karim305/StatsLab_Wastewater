@@ -122,7 +122,7 @@ library(dbplyr)
 par<-as.matrix(c(7.5,0.5))
 
 #do the optimization 
-optim(par=c(1,2), fn=wholeloss, df=combine, method = "L-BFGS-B")
+optim(par=par, fn=wholeloss, df=combine, method = "L-BFGS-B")
 
 # Error in ecdf(draws) : 'x' must have 1 or more non-missing values
 # In addition: Warning message:
