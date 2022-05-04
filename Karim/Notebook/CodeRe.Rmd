@@ -3,9 +3,10 @@ title: "WastewaterRe Code Summary"
 author: "Karim El-Ouaghlidi"
 date: "4/25/2022"
 output:
-  pdf_document: default
   html_document:
+    toc: true
     df_print: paged
+  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -61,14 +62,11 @@ raw_gene_data_ZH <- read_delim(ZH_genes_url, delim = ';',
 
 ```
 
-# Summary of code used in WastewaterRe Paper by Huisman et. al
+# Summary of code used in WastewaterRe Paper by Huisman et. al (file wastewater_Zurich.R)
 
+# - Initial data manipulation (outside of complicated, nested functions)
 
-# - wastewater_Zurich.R
-
-## - Initial data manipulation (outside of complicated, nested functions)
-
-### - Wastewater ("Flow") data
+## - Wastewater ("Flow") data
 
 - flow data is loaded with col_names = c('date', 'cases', 'cases_smooth','flow', 'n1_smooth', 'n2_smooth')
 
@@ -89,7 +87,7 @@ raw_data_ZH <- raw_flow_data_ZH %>%
   mutate(region = 'ZH')
 ```
 
-### - Case data
+## - Case data
 
 - Catchment level clinical case data: missing values are set to 0
 
@@ -119,7 +117,7 @@ case_data_plot <- ggplot(plot_orig_cases) +
 case_data_plot
 ```
 
-## - Deconvolution of Case data 
+# - Deconvolution of Case data 
 
 - Let $C$ denote the observed cases and $D$ denote the delay distribution ("transfer function") from true underlying incidence $I_{cc}$ to $C$. 
 - Then, $C = I_{cc} \ast D$ is the convolution of true incidence $I_{cc}$ and delay function $D$.
@@ -145,7 +143,7 @@ for(inc_var in c('confirmed')){
 
 ```
 
-# - deconvolveIncidence()
+## deconvolveIncidence()
 
 - Let's have a closer look at the called function wrapper:
 
@@ -259,7 +257,7 @@ make_ecdf_from_gammas <- function(shape, scale, numberOfSamples = 1E6) {
 
 ```
 
-# - get_infection_incidence_by_deconvolution()
+## get_infection_incidence_by_deconvolution()
 
 ```{r eval = FALSE}
 ## Actual deconvolution function..
@@ -529,7 +527,7 @@ all.equal(constant_delay_distribution[1:7],
 
 ```
 
-- # "stepwise" function call
+### - "stepwise" function call
 ```{r}
 days_further_in_the_past <- 30
 
@@ -595,7 +593,7 @@ ggplot() +
   xlab('')
 ```
 
-# do_deconvolution()
+## do_deconvolution()
 
 - After putting together the necessary inputs the actual deconvolution function `do_deconvolution()` is called.
     - `smoothed_incidence_data`
@@ -661,7 +659,7 @@ do_deconvolution <- function(
 
 ```
 
-
+### - Stepwise function call
 
 ```{r stepwise do_deconvolution}
 # setting function arguments 
@@ -737,7 +735,7 @@ incidence_data <- smoothed_incidence_data
 
 
 ```
-# iterate_RL()
+## iterate_RL()
 - `do_deconvolution()` is another wrapper function for `iterate_RL()`, which implements the [Richardson-Lucy Algorithm](https://en.wikipedia.org/wiki/Richardson–Lucy_deconvolution).
 - This algorithm starts with a shifted and extended version of the original dataset as `initial_estimate = first_guess`. Specifically, the time series of reported cases is shifted by 7 days in the past, 30 days are added to the left and the resulting 30 missing values left and 7 right are imputed using the first and last observation of reported cases, respectively.
 - Additional inputs to the function are:
@@ -747,7 +745,7 @@ incidence_data <- smoothed_incidence_data
     - `max_iterations = 100`
     - `max_delay = 30`
 
-## Function
+### - Function
 
 ```{r iterate_RL, eval = FALSE}
 
@@ -793,7 +791,7 @@ iterate_RL <- function(
 
 ```
 
-## Stepwise examination
+### - Stepwise examination
 
 ```{r iterate_RL stepwise}
 
@@ -845,7 +843,7 @@ threshold_chi_squared <- 1
 
 ```
 
-## Further stepwise processing
+### - Further stepwise processing
 
 ```{r stepwise contd}
 
@@ -891,7 +889,7 @@ ggplot() +
 ```
 
 
-# Richardson-Lucy deconvolution applied to cases
+## Richardson-Lucy deconvolution applied to cases
 
 - Iterative deconvolution procedure to recover underlying image (or time series in our case) that has been blurred by a *known* point spread function (PSF)
 
@@ -908,7 +906,7 @@ ggplot() +
 $$ I_{cc}^{i+1} = \frac{ I_{cc}^{i} }{ \mathbf{P}^\mathbf T_{ \left[  31:189,1:189 \right]} \cdot{} \mathbf 1} \left( \frac{C}{ \mathbf P \cdot I_{cc}^i} \times \mathbf P \right) $$
 
 
-## - RL deconvolution in R
+### - RL deconvolution in R
 
 ```{r eval = FALSE}
 ## RL deconvolution in R
@@ -935,7 +933,10 @@ $$ I_{cc}^{i+1} = \frac{ I_{cc}^{i} }{ \mathbf{P}^\mathbf T_{ \left[  31:189,1:1
 
 ```
 
+# Deconvolution of Wastewater Data
+
 ## - Normalisation of Wastewater Data
+- Note that this follows after the initial data manipulations presented above.
 ```{r}
 ## Normalisation of WW data ####
 
@@ -954,23 +955,6 @@ plot_raw_ww_data <- ww_data %>%
   dplyr::select(date, orig_data, region, N1 = n1, N2 = n2) %>%
   pivot_longer(cols = c(N1, N2)) %>%
   mutate(name_orig = ifelse(!is.na(orig_data), name, 'Imputed'))
-
-
-
-ww_data_plot <- ggplot() +
-  geom_point(data = plot_raw_ww_data, aes(x=date, y= value, colour = name_orig),
-             size = 2, show.legend = F) +
-  geom_line(data = plot_raw_ww_data %>% filter(orig_data), 
-            aes(x=date, y= value,colour = name), linetype = 'dotted', show.legend = F) +
-  labs(x = 'Date' , y='Gene copies per day') +
-  scale_x_date(limits = c(as_date('2020-08-15'), as_date('2021-01-20')) ) +
-  scale_colour_manual(values = c(viridis(4)[3:4], 'lightgrey'), 
-                      labels = c('N1', 'N2', 'Imputed'),
-                      breaks = c('N1', 'N2', 'Imputed'),
-                      name = 'Variable') + 
-  labs(colour = 'Variable') 
-
-ww_data_plot
 
 ```
 
@@ -1018,8 +1002,10 @@ for(row_i in 1:nrow(config_df)){
 
 ```
 
-# - Scanning of different SLDs
+## - Scanning of different SLDs
 - They are scanning across 600 different combinations of mean x sd.
+- The outer loop goes over the two different types of delay distributions. Essentially, they scan over the 600 different SLD paramter combinations twice. 
+- We could adapt this loop for our purposes in order to loop over variants and cantons.
 ```{r eval = FALSE}
 
 #Scan across deconvolution parameters ####
@@ -1030,6 +1016,7 @@ for(row_i in 1:nrow(config_df)){
      for (canton in c('ZH')){
 
        proc_data <- ww_data %>% filter(region == canton)
+       # plotData is modified version of Re_cases
        plotData_subset <- plotData %>% filter(region == canton)
 
        # the scan values
@@ -1066,10 +1053,15 @@ for(row_i in 1:nrow(config_df)){
    }
  }
 
-###############
-# Results of the scan
 
-# Where:
+```
+### - Stepwise examination
+```{r}
+
+row_id <- 1
+incubationParam <-'zero'
+incidence_var <- 'norm_n1'
+canton <- 'ZH'
 
 Restimates <- Re_cases %>%
   mutate(region = 'ZH') %>%
@@ -1091,9 +1083,66 @@ plotData <- Restimates %>%
          date <= date_ranges[date_ranges$region == 'ZH',]$max_date )
 
 
+# Input data: Wastewater
+(proc_data <- ww_data %>% filter(region == canton))
+# Input data: Cases
+(plotData_subset <- plotData %>% filter(region == canton))
+
+
+# the scan values
+meanOpts = seq(0.5, 15, 0.5)
+sdOpts = seq(0.5, 10, 0.5)
+
+deconv_results = cbind(expand_grid(meanOpts, sdOpts),
+                              'rmse_cc' = NA, 'coverage_cc' = NA, 'mape_cc' = NA,
+                              'rmse_h' = NA, 'coverage_h' = NA, 'mape_h' = NA)
+# Check how deconv_results looks
+deconv_results
+      
+
+# Input parameters delay distribution
+getCountParams(incubationParam)
+                  
+# Input parameters  SLD
+getGammaParams(deconv_results[row_id, 'meanOpts'], deconv_results[row_id, 'sdOpts'])
+
+
+deconv_config = try(deconvolveIncidence(proc_data, incidence_var,
+                                                 getCountParams(incubationParam),
+                                                 getGammaParams(deconv_results[row_id, 'meanOpts'],
+                                                                deconv_results[row_id, 'sdOpts']),
+                                                 smooth_param = TRUE, n_boot = 50))
+
+deconv_config
+
+# go to next iteration in case there is some error message
+if('try-error' %in% class(deconv_config)){
+           deconv_results[row_id, c('rmse_cc', 'coverage_cc', 'mape_cc')] = c(Inf, 0, Inf)
+           deconv_results[row_id, c('rmse_h', 'coverage_h', 'mape_h')] = c(Inf, 0, Inf)
+           next
+}
+
+# Obtain R value from deconvolved series
+Re_config = getReBootstrap(deconv_config)
+
+Re_config
+
+         
+deconv_results[row_id, c('rmse_cc', 'coverage_cc', 'mape_cc')] = compareTraces(Re_config, plotData_subset %>%
+                                                                                          filter(data_type == 'Confirmed cases'))
+       
+
+deconv_results 
+#write_csv(deconv_results, paste0('../scan/deconv_', incubationParam, '_',canton, '_', incidence_var, '.csv'))
+
+
 ```
 
 
+
+
+
+### - compareTraces()
 ```{r eval = FALSE}
 
 compareTraces <- function(Re_i, Re_j){
@@ -1115,6 +1164,22 @@ compareTraces <- function(Re_i, Re_j){
 
 
 ```
+
+#### - Input objects
+
+```{r}
+
+Re_config
+
+plotData_subset %>%
+  filter(data_type == 'Confirmed cases')
+
+
+compareTraces(Re_config, plotData_subset %>%
+                                                                                          filter(data_type == 'Confirmed cases'))
+```
+
+
 
 
 
