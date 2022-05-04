@@ -12,7 +12,7 @@ library(estimateR)
 # import data
 
 all_files <- list.files(path = "data", pattern = ".csv$")
-files <- all_files[2:length(all_files)]
+files <- all_files[2:(length(all_files)-1)]
 file_path <- paste0("data/", files)
 
 data <- file_path %>%

@@ -4,6 +4,8 @@
 library(imputeTS)
 library(tidyverse)
 library(xts)
+library(astrochron)
+library(TSA)
 
 # load data
 all_files <- list.files(path = "data", pattern = ".csv$")
@@ -85,7 +87,10 @@ sim_RMSE <-function(num_NA = 20, data = zh_ts){
   # Spline Interpolation
   m4 <- mean((na_interpolation(zh_gaps, option = "spline") - data)^2)
   
-  TS1 <- t(data.frame(row.names =c('LOCF', 'NOCB', 'Linear', 'Spline'), MSE=c(m1, m2, m3, m4)))
+  m5 <- mean((zoo::na.approx(zh_gaps, na.rm = F) - data)^2)
+  
+  
+  TS1 <- t(data.frame(row.names =c('LOCF', 'NOCB', 'Linear', 'Spline', 'Linear (Jana)'), MSE=c(m1, m2, m3, m4, m5)))
   
   
   
@@ -119,7 +124,7 @@ sim_RMSE <-function(num_NA = 20, data = zh_ts){
 test <- replicate(100, sim_RMSE(num_NA = 50, data = zh_ts), simplify = "matrix")
 
 df <- t(data.frame(test,
-                 row.names = c('LOCF', 'NOCB', 'Linear', 'Spline', "Seas-Adj+Random", "Seas-Adj+Mean", "Seas-Adj+LOCF","Seas-Adj+Linear", "Seas-Adj+Kalman")))
+                 row.names = c('LOCF', 'NOCB', 'Linear', 'Spline', 'Linear (Jana)', "Seas-Adj+Random", "Seas-Adj+Mean", "Seas-Adj+LOCF","Seas-Adj+Linear", "Seas-Adj+Kalman")))
 
 # get data frame in long format to plot histograms with ggplot
 for (i in seq_along(colnames(df))){
@@ -160,6 +165,8 @@ df_long %>%
   filter(Method != "Seas-Adj+Mean") %>%
   ggplot() + 
   geom_density(aes(MSE, fill = Method)) +
-  facet_wrap(~Method) +
-  geom_vline(data = mean_plot, aes(xintercept = mean))
+  facet_wrap(~Method, nrow = 2) +
+  geom_vline(data = mean_plot, aes(xintercept = mean)) + 
+  labs(title = "Comparison of different imputation methods based on 50 randomly selected missing values and 100 simulations")
+
 

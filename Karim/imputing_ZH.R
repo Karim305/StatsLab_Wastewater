@@ -142,5 +142,114 @@ ma5 <- mean((na_seadec(zh_gaps, algorithm = "kalman") - zh_ts)^2)
 TS2 <- data.frame(methods=c("Seas-Adj+Random", "Seas-Adj+Mean", "Seas-Adj+LOCF","Seas-Adj+Linear", "Seas-Adj+Kalman"),
                   MSE=c(ma1, ma2, ma3, ma4, ma5))
 
+dates <- data_zh$date
 
 
+
+par(mfrow=c(1,1))
+
+plot(data_zh[,c("date","new_cases")], main="New cases ZH")
+
+lines(lowess(dates, zh_ts, f = 0.1), col = "green") 
+lines(lowess(dates, zh_ts, f = 0.05), col = "red") 
+
+df_zh <- data.frame(date = dates, cases = zh_ts, index = 1:length(dates))
+
+lines(loess(cases~index, data = df_zh, span = 0.1)$fitted, col = "yellow")
+
+test <- loess(cases~index, data = df_zh, span = 0.1)$fitted
+
+# define function that returns the SSE
+calcSSE <- function(x){
+  loessMod <- loess(cases ~ index, data = df_zh, span=x)
+  res <- loessMod$residuals
+  if(class(res)!="try-error"){
+    if((sum(res, na.rm=T) > 0)){
+      sse <- sum(res^2)  
+    }
+  }else{
+    sse <- 99999
+  }
+  return(sse)
+}
+
+
+# define function that returns the SSE
+calcSSE <- function(x){
+  loessMod <- try(loess(cases ~ index, data = df_zh, span=x), silent=T)
+  res <- try(loessMod$residuals, silent=T)
+  if(class(res)!="try-error"){
+    if((sum(res, na.rm=T) > 0)){
+      sse <- sum(res^2)  
+    }
+  }else{
+    sse <- 99999
+  }
+  return(sse)
+}
+
+# Run optim to find span that gives min SSE, starting at 0.5
+optim(par=c(0.1), calcSSE, method="SANN")
+optim(par=c(0.5), calcSSE, method="SANN")
+
+
+optim(par=0.1, calcSSE, method="SANN")
+
+
+
+
+
+# define function that returns the SSE
+calcSSE <- function(x){
+  loessMod <- try(loess(cases ~ index, data=df_zh, span=x), silent=T)
+  res <- try(loessMod$residuals, silent=T)
+  if(class(res)!="try-error"){
+    if(abs(sum(res, na.rm=T)) > 0){
+      sse <- sum(res^2)  
+    }
+  }else{
+    sse <- 99999
+  }
+  return(sse)
+}
+
+# Run optim to find span that gives min SSE, starting at 0.5
+optim(par=c(0.1), calcSSE, method="SANN")
+
+
+
+data(economics, package="ggplot2")  # load data
+economics$index <- 1:nrow(economics)  # create index variable
+economics <- economics[1:80, ]  # retail 80rows for better graphical understanding
+loessMod10 <- loess(uempmed ~ index, data=economics, span=0.10) # 10% smoothing span
+loessMod25 <- loess(uempmed ~ index, data=economics, span=0.25) # 25% smoothing span
+loessMod50 <- loess(uempmed ~ index, data=economics, span=0.50) # 50% smoothing span
+
+# get smoothed output
+smoothed10 <- predict(loessMod10) 
+smoothed25 <- predict(loessMod25) 
+smoothed50 <- predict(loessMod50) 
+
+# Plot it
+plot(economics$uempmed, x=economics$date, type="l", main="Loess Smoothing and Prediction", xlab="Date", ylab="Unemployment (Median)")
+lines(smoothed10, x=economics$date, col="red")
+lines(smoothed25, x=economics$date, col="green")
+lines(smoothed50, x=economics$date, col="blue")
+
+
+# define function that returns the SSE
+calcSSE <- function(x){
+  loessMod <- try(loess(uempmed ~ index, data=economics, span=x), silent=T)
+  res <- try(loessMod$residuals, silent=T)
+  if(class(res)!="try-error"){
+    if((abs(sum(res, na.rm=T)) > 0)){
+      sse <- sum(res^2)  
+    }
+  }else{
+    sse <- 99999
+  }
+  return(sse)
+}
+
+# Run optim to find span that gives min SSE, starting at 0.5
+optim(par=c(0.5), calcSSE, method="SANN")
