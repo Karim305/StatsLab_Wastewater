@@ -2,7 +2,10 @@
 title: "WastewaterRe Code Summary"
 author: "Karim El-Ouaghlidi"
 date: "4/25/2022"
-output: pdf_document
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
 ---
 
 ```{r setup, include=FALSE}
@@ -600,7 +603,7 @@ ggplot() +
     - `initial_delta`: index at which cumsum of delay distribution vector exceeds median
 - `do_deconvolution()` function:
 
-```{r do_deconvolution eval = FALSE}
+```{r do_deconvolution, eval = FALSE}
 do_deconvolution <- function(
   incidence_data,
   days_further_in_the_past = 30,
@@ -746,7 +749,7 @@ incidence_data <- smoothed_incidence_data
 
 ## Function
 
-```{r iterate_RL eval = FALSE}
+```{r iterate_RL, eval = FALSE}
 
 iterate_RL <- function(
   initial_estimate,
@@ -844,7 +847,7 @@ threshold_chi_squared <- 1
 
 ## Further stepwise processing
 
-```{r stepwise cont'd}
+```{r stepwise contd}
 
 ## do_deconvolution()
 deconvolved_dates <- first_guess %>% 
@@ -896,17 +899,19 @@ ggplot() +
 
 - Recall our original deconvolution problem: $C = I_{cc} \ast D$  where we are interested in estimating the ground truth infection incidence time series $I_{cc}$.
 
-- Then, $C_t = \sum_j {\mathbf{P}_{t,j} \cdot{} I_{cc}^j}$ are the observed cases at day t, where $\mathbf{P}$ is `delay_distribution_matrix` As mentioned above, this matrix is a T by T lower-diagonal matrix with the vectorized delay distributions as columns starting at the diagonal element created by the function `get_matrix_constant_waiting_time_distr()`.  (see above for illustration).
+- Then, $C_t = \sum_j {\mathbf{P}_{t,j} \cdot{} I_{cc}^j}$ are the observed cases at day t, where $\mathbf{P}$ is `delay_distribution_matrix`. As mentioned above, this matrix is a T by T lower-diagonal matrix with the vectorized delay distributions as columns starting at the diagonal element created by the function `get_matrix_constant_waiting_time_distr()`.  (see above for illustration).
 
-- Following the RL algorithm: $I_{cc}^{i+1} = I_{cc}^{i} \left( \frac{C}{\mathbf P \cdot I_{cc}^i} \times \mathbf P \right) $, where the division is elementwise.
+- Following the RL algorithm: $$ I_{cc}^{i+1} = I_{cc}^{i} \left( \frac{C}{ \mathbf P \cdot{} I_{cc}^i } \times \mathbf P \right) $$, where the division is elementwise.
+
 
 - For our purpose, however, we need a small adjustment to correct for the fact that we might observe infections that are not fully transmitted into the wastewater:
-$I_{cc}^{i+1} = \frac{I_{cc}^{i}}{\mathbf{P}^\mathbf T_{\left[ 31:189,1:189 \right]} \cdot \mathbf 1} \left( \frac{C}{\mathbf P \cdot I_{cc}^i} \times \mathbf P \right) $ 
+$$ I_{cc}^{i+1} = \frac{ I_{cc}^{i} }{ \mathbf{P}^\mathbf T_{ \left[  31:189,1:189 \right]} \cdot{} \mathbf 1} \left( \frac{C}{ \mathbf P \cdot I_{cc}^i} \times \mathbf P \right) $$
 
 
-
+## - RL deconvolution in R
 
 ```{r eval = FALSE}
+## RL deconvolution in R
   Q_vector <- apply(truncated_delay_distribution_matrix, MARGIN = 2, sum)
   
   while(chi_squared > threshold_chi_squared & count <= max_iterations) {
@@ -926,6 +931,187 @@ $I_{cc}^{i+1} = \frac{I_{cc}^{i}}{\mathbf{P}^\mathbf T_{\left[ 31:189,1:189 \rig
     
     chi_squared <- 1/N0 * sum((E[(max_delay + 1): length(E)] - original_incidence[(max_delay + 1) : length(original_incidence)])^2/E[(max_delay + 1): length(E)], na.rm = T)
     count <- count + 1
+
+
+```
+
+## - Normalisation of Wastewater Data
+```{r}
+## Normalisation of WW data ####
+
+# Min observed
+norm_min <- min(raw_data_ZH$n1, raw_data_ZH$n2)
+
+### ALL Normalised WW DATA ####
+ww_data = bind_rows(raw_data_ZH)  %>%
+  mutate(norm_n1 = n1/norm_min,
+         norm_n2 = n2/norm_min)
+
+ww_data 
+
+# Plot raw data #####
+plot_raw_ww_data <- ww_data %>%
+  dplyr::select(date, orig_data, region, N1 = n1, N2 = n2) %>%
+  pivot_longer(cols = c(N1, N2)) %>%
+  mutate(name_orig = ifelse(!is.na(orig_data), name, 'Imputed'))
+
+
+
+ww_data_plot <- ggplot() +
+  geom_point(data = plot_raw_ww_data, aes(x=date, y= value, colour = name_orig),
+             size = 2, show.legend = F) +
+  geom_line(data = plot_raw_ww_data %>% filter(orig_data), 
+            aes(x=date, y= value,colour = name), linetype = 'dotted', show.legend = F) +
+  labs(x = 'Date' , y='Gene copies per day') +
+  scale_x_date(limits = c(as_date('2020-08-15'), as_date('2021-01-20')) ) +
+  scale_colour_manual(values = c(viridis(4)[3:4], 'lightgrey'), 
+                      labels = c('N1', 'N2', 'Imputed'),
+                      breaks = c('N1', 'N2', 'Imputed'),
+                      name = 'Variable') + 
+  labs(colour = 'Variable') 
+
+ww_data_plot
+
+```
+
+## - Deconvolution of case data with given SLD
+
+```{r}
+##### Deconvolve and Estimate WW Re #####
+
+config_df = expand.grid("region" = c('ZH'),  
+                        'incidence_var' = c('norm_n1', 'norm_n2'),
+                        'FirstGamma' = 'incubation',
+                        'SecondGamma' = 'benefield' )
+
+config_df
+
+getCountParams(as.character(config_df[1, 'FirstGamma']))
+getCountParams(as.character(config_df[1, 'SecondGamma']))
+
+getCountParams(as.character(config_df[2, 'FirstGamma']))
+getCountParams(as.character(config_df[2, 'SecondGamma']))
+
+
+deconv_ww_data <- data.frame()
+Re_ww <- data.frame()
+
+for(row_i in 1:nrow(config_df)){
+  new_deconv_data = deconvolveIncidence(ww_data %>% filter(region == config_df[row_i, 'region']), 
+                                        incidence_var = config_df[row_i, 'incidence_var'],
+                                        getCountParams(as.character(config_df[row_i, 'FirstGamma'])), 
+                                        getCountParams(as.character(config_df[row_i, 'SecondGamma'])),
+                                        smooth_param = TRUE, n_boot = 50)
+  
+  new_deconv_data <- new_deconv_data %>%
+    mutate(incidence_var = config_df[row_i, 'incidence_var'])
+  
+  ##### Get Re #####
+  new_Re_ww = getReBootstrap(new_deconv_data)
+  new_Re_ww <- new_Re_ww %>%
+    mutate(variable = config_df[row_i, 'incidence_var'],
+           region = config_df[row_i, 'region'])
+  
+  deconv_ww_data <- bind_rows(deconv_ww_data, new_deconv_data)
+  Re_ww = bind_rows(Re_ww, new_Re_ww)
+}
+
+```
+
+# - Scanning of different SLDs
+- They are scanning across 600 different combinations of mean x sd.
+```{r eval = FALSE}
+
+#Scan across deconvolution parameters ####
+
+# Uncommented because this takes about 2 hrs per scan
+ for (incubationParam in c('zero', 'incubation')){
+   for (incidence_var in c('norm_n1')){
+     for (canton in c('ZH')){
+
+       proc_data <- ww_data %>% filter(region == canton)
+       plotData_subset <- plotData %>% filter(region == canton)
+
+       # the scan values
+       meanOpts = seq(0.5, 15, 0.5)
+       sdOpts = seq(0.5, 10, 0.5)
+
+       deconv_results = cbind(expand_grid(meanOpts, sdOpts),
+                              'rmse_cc' = NA, 'coverage_cc' = NA, 'mape_cc' = NA,
+                              'rmse_h' = NA, 'coverage_h' = NA, 'mape_h' = NA)
+
+       for (row_id in 1:nrow(deconv_results)){
+         deconv_config = try(deconvolveIncidence(proc_data, incidence_var,
+                                                 getCountParams(incubationParam),
+                                                 getGammaParams(deconv_results[row_id, 'meanOpts'],
+                                                                deconv_results[row_id, 'sdOpts']),
+                                                 smooth_param = TRUE, n_boot = 50))
+
+         if('try-error' %in% class(deconv_config)){
+           deconv_results[row_id, c('rmse_cc', 'coverage_cc', 'mape_cc')] = c(Inf, 0, Inf)
+           deconv_results[row_id, c('rmse_h', 'coverage_h', 'mape_h')] = c(Inf, 0, Inf)
+           next
+         }
+
+         Re_config = getReBootstrap(deconv_config)
+
+         deconv_results[row_id, c('rmse_cc', 'coverage_cc', 'mape_cc')] = compareTraces(Re_config, plotData_subset %>%
+                                                                                          filter(data_type == 'Confirmed cases'))
+       }
+
+       write_csv(deconv_results, paste0('../scan/deconv_', incubationParam, '_',
+                                        canton, '_', incidence_var, '.csv'))
+
+     }
+   }
+ }
+
+###############
+# Results of the scan
+
+# Where:
+
+Restimates <- Re_cases %>%
+  mutate(region = 'ZH') %>%
+  mutate(data_type = recode_factor(data_type,
+                            infection_confirmed = "Confirmed cases",
+                            infection_hospitalised = "Hospitalized patients",
+                            infection_death = "Deaths") ) %>%
+  mutate(countryIso3 = 'CHE')
+
+date_ranges <- Re_ww %>%
+  group_by(region) %>%
+  summarise(min_date = min(date),
+            max_date = max(date)) 
+
+plotData <- Restimates %>%
+  filter(region %in% c('ZH'),
+         estimate_type == 'Cori_slidingWindow',
+         date >= date_ranges[date_ranges$region == 'ZH', ]$min_date,
+         date <= date_ranges[date_ranges$region == 'ZH',]$max_date )
+
+
+```
+
+
+```{r eval = FALSE}
+
+compareTraces <- function(Re_i, Re_j){
+  compare_df = Re_i %>%
+    left_join(Re_j, by = 'date', suffix = c(".i", ".j")) %>%
+    mutate(se = (median_R_mean.i - median_R_mean.j)^2,
+           rele = abs((median_R_mean.j - median_R_mean.i)/median_R_mean.j),
+           coverage = (median_R_mean.i > median_R_lowHPD.j) & (median_R_mean.i < median_R_highHPD.j) ) 
+  
+  se = compare_df %>% pull(se)
+  rele = compare_df %>% pull(rele)
+  coverage = compare_df %>% pull(coverage) %>% sum(na.rm = T) /length(Re_i$date)
+  
+  rmse = sqrt(sum(se, na.rm = T)/length(Re_i$date))
+  mape = sum(rele, na.rm = T)/length(Re_i$date)
+  
+  return(c(rmse, coverage, mape))
+}
 
 
 ```
