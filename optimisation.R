@@ -1,0 +1,540 @@
+library(tidyverse)
+library(lubridate)
+library(patchwork)
+library(viridis)
+
+###########################################################################33
+#########################################################################33
+# Nested functions 1, don't need editing
+
+### nested functions 1, in get_infection_incidence_by_deconvolution
+get_matrix_constant_waiting_time_distr <- function(waiting_time_distr,all_dates) { 
+  # waiting_time_distr is a 'pdf', all_dates
+  
+  #### initialization
+  N <- length(all_dates) # length of time series
+  if(length(all_dates) >= length(waiting_time_distr)) { # 我们的waiting_time_distr有200天
+    waiting_time_distr <- c(waiting_time_distr, rep(0, times = N - length(waiting_time_distr))) # 用0补上, assune probabiliyt = 0
+  }
+  
+  #### draw matrix
+  delay_distribution_matrix <- matrix(0, nrow = N, ncol = N)
+  for(i in 1:N) {
+    delay_distribution_matrix[, i ] <-  c(rep(0, times = i - 1 ), waiting_time_distr[1:(N - i + 1)])
+  }
+  
+  return(delay_distribution_matrix)
+}
+
+###################################
+# we dont even need this anymore, find gamma parameters from mean/sd of distribution
+getGammaParams <- function(meanParam, sdParam){
+  shapeParam <- meanParam^2 / (sdParam^2)
+  scaleParam <- (sdParam^2) / meanParam
+  return(list(shape = shapeParam, scale = scaleParam))
+}
+
+#########################################################################
+#########################################################################
+### Nested functions 2, bootstrapping and smoothing related functions
+# get_bootstrap_replicate - get_infection_incidence_by_deconvolution
+# days_incl is a parameter of getLOESSCases
+# block_size is a parameter of block_boot_overlap_funcc
+get_bootstrap_replicate <- function(
+    original_time_series, 
+    block_size = 10, 
+    days_incl = 21) { # to sample one time series based on LOESS and block bootstrap
+  
+  tmp <- original_time_series
+  tmp$log_value <- log(tmp$value + 1)
+  
+  # Smoothing
+  smoothed_incidence_data <- tmp %>%
+    complete(date = seq.Date(min(date), max(date), by = "days"), fill = list(log_value = 0)) %>%
+    mutate(log_loess = getLOESSCases(dates = date, count_data = log_value, days_incl), # getLOESSCases returns a vector
+           log_diff = log_value - log_loess)
+  
+  # Sampling 
+  log_diff_boot <- block_boot_overlap_func(smoothed_incidence_data$log_diff, block_size)
+  log_smoothed_data <- smoothed_incidence_data$log_loess
+  
+  ts_boot <- exp(log_diff_boot + log_smoothed_data) -1
+  ts_boot[ts_boot<0] <- 0
+  ts_boot <- round(ts_boot)
+  
+  replicate <- original_time_series %>%
+    complete(date = seq.Date(min(date), max(date), by = "days"), fill = list(value = 0)) %>%
+    dplyr::mutate(value = ts_boot) %>%
+    arrange(date)
+  
+  return(replicate)
+}
+
+##################################################################
+# smooth time series with LOESS method, get_bootstrap_replicate -  get_infection_incidence_by_deconvolution
+getLOESSCases <- function(dates, count_data, days_incl = 21, degree = 1, truncation = 0) {
+  
+  if (truncation != 0) {
+    dates <- dates[1:(length(dates) - truncation)]
+    count_data <- count_data[1:(length(count_data) - truncation)]
+  }
+  
+  n_points <- length(unique(dates))
+  sel_span <- days_incl / n_points
+  
+  n_pad <- round(length(count_data) * sel_span * 0.5)
+  
+  c_data <- data.frame(value = c(rep(0, n_pad), count_data),
+                       date_num = c(seq(as.numeric(dates[1]) - n_pad, as.numeric(dates[1]) - 1),
+                                    as.numeric(dates)))
+  c_data.lo <- loess(value ~ date_num, data = c_data, span = sel_span, degree = degree)
+  smoothed <- predict(c_data.lo)
+  smoothed[smoothed < 0] <- 0
+  raw_smoothed_counts <- smoothed[(n_pad + 1):length(smoothed)]
+  normalized_smoothed_counts <-
+    raw_smoothed_counts * sum(count_data, na.rm = T) / sum(raw_smoothed_counts, na.rm = T)
+  
+  if (truncation != 0) {
+    normalized_smoothed_counts <- append(normalized_smoothed_counts, rep(NA, truncation))
+  }
+  return(normalized_smoothed_counts)
+}
+
+###########################################################################33
+#########################################################################33
+### Nested functions 3, convolution related functions
+# do_deconvolution - get_infection_incidence_by_deconvolution
+do_deconvolution <- function(
+    incidence_data,# smoothed incidence data
+    days_further_in_the_past, # this is the dimension of the deconvolution function, i.e. how many days after the infection
+    #verbose = FALSE, # we dont need this
+    delay_distribution_matrix,# calculated matrix of 'probability'
+    initial_delta, # this is the mode of the delay distribution, 
+    max_iterations = 100, # cap on the number of iterations of RL algorithm
+    threshold_chi_squared = threshold_chi_squared
+) {
+  ######### Initialization
+  first_guess_delay <- ceiling(initial_delta) # fixed delay for the initial value
+  
+  first_recorded_incidence <-  with(filter(incidence_data, cumsum(value) > 0), value[which.min(date)]) 
+  last_recorded_incidence <- with(incidence_data, value[which.max(date)])
+  
+  minimal_date <- min(incidence_data$date) - days_further_in_the_past
+  maximal_date <- max(incidence_data$date)
+  
+  first_guess <- incidence_data %>% # assume fixed delay, and directly shift data, not using deconvolution, described in Deconvolution paper
+    mutate(date = date - first_guess_delay) %>% # shift date column
+    complete(date = seq.Date(minimal_date, min(date), by = "days"), 
+             fill = list(value = first_recorded_incidence)) %>% # left-pad with first recorded value: fill the missing values before the srart of original data set with a fixed number first_recorded_incidence
+    complete(date = seq.Date(max(date), maximal_date, by = "days"),
+             fill = list(value = last_recorded_incidence)) %>% # right-pad with last recorded value: fill the missing values after the end of original data set
+    arrange(date) %>% 
+    filter(date >=  minimal_date)
+  
+  original_incidence <- incidence_data %>% # impute missing values with 0
+    complete(date = seq.Date(minimal_date, maximal_date, by = "days"),
+             fill = list(value = 0)) %>% 
+    pull(value)
+  
+  ############################ run the RL algorithm
+  # nested nested function, iterate_RL
+  final_estimate <- iterate_RL( 
+    first_guess$value, # shifted smoothed data
+    original_incidence,
+    delay_distribution_matrix = delay_distribution_matrix,# matrix of pdf
+    max_delay = days_further_in_the_past,# 30
+    max_iterations = max_iterations,
+    threshold_chi_squared = threshold_chi_squared)# 100
+  #verbose = verbose)
+  
+  ###### output the deconvolved data
+  deconvolved_dates <- first_guess %>% pull(date)
+  result <- tibble(date = deconvolved_dates, value = final_estimate)
+  result <- result %>%
+    filter(date <= maximal_date - first_guess_delay) # truncate
+  return(result)
+}
+
+
+##################################################################################3
+#### nested function - do_deconvolution - get_infection_incidence_by_deconvolution
+iterate_RL <- function( # Richardson-Lucy EM Algorithm, described in paper. it returns deconvolved incidence data
+  initial_estimate,
+  original_incidence,
+  delay_distribution_matrix,
+  threshold_chi_squared,
+  max_iterations,
+  max_delay) { # hyper parameter, number of days in the delay distribution = days_further_in_the_past
+  #verbose = FALSE # we dont need this parameter
+  
+  current_estimate <- initial_estimate
+  N <- length(current_estimate)
+  N0 <- N - max_delay
+  chi_squared <- Inf
+  count <- 1
+  
+  delay_distribution_matrix <- delay_distribution_matrix[1:length(current_estimate), 1:length(current_estimate)] # truncate delay distribution according to the dimension of data
+  truncated_delay_distribution_matrix <- delay_distribution_matrix[(1 + max_delay):NROW(delay_distribution_matrix),, drop = F] # trancate again, row starting from a different date
+  
+  Q_vector <- apply(truncated_delay_distribution_matrix, MARGIN = 2, sum) # summing each columns and return a vector
+  
+  while(chi_squared > threshold_chi_squared & count <= max_iterations) {
+    
+    #if (verbose) {
+    #  cat("\t\tStep: ", count, " - Chi squared: ", chi_squared, "\n")
+    #}
+    
+    E <- as.vector(delay_distribution_matrix %*% current_estimate) # matrix multiplication, n*n * n*1 = n*1
+    B <- replace_na(original_incidence/E, 0) # ? wny missing values arise
+    
+    current_estimate <- current_estimate / Q_vector *  as.vector(crossprod(B, delay_distribution_matrix)) # ? why
+    current_estimate <- replace_na(current_estimate, 0) #? why missing values arise
+    
+    chi_squared <- 1/N0 * sum((E[(max_delay + 1): length(E)] - original_incidence[(max_delay + 1) : length(original_incidence)])^2/E[(max_delay + 1): length(E)], na.rm = T) # what's this metric?
+    count <- count + 1
+  }
+  
+  return(current_estimate)
+}
+
+#########################################################################
+#########################################################################
+##### Nested functions 4 to construct delay distribution !
+###  build usable delay distribution (parameter name constant_delay_distributions in deconvolve Incidence)
+### get_vector_constant_waiting_time_distr. It build an empirical pdf from mix
+get_vector_constant_waiting_time_distr <- function(shape_incubation,
+                                                   scale_incubation,
+                                                   shape_onset_to_report,
+                                                   scale_onset_to_report,
+                                                   length_out,
+                                                   hypothesis,
+                                                   days_further_in_the_past){ 
+  F_h <- make_ecdf_from_gammas(shape = c(shape_incubation, shape_onset_to_report), 
+                               scale = c(scale_incubation, scale_onset_to_report), 
+                               hypothesis = hypothesis,
+                               days_further_in_the_past = days_further_in_the_past)
+  
+  f <- Vectorize(function(x){
+    if(x < 0) {
+      return(0)
+    } else if(x < 0.5) {
+      return(F_h(0.5))
+    } else {
+      return(F_h(round(x + 1E-8) + 0.5) - F_h(round(x + 1E-8) - 0.5))
+    }
+  })
+  
+  x <- 0:(length_out - 1)
+  
+  return(f(x))
+}
+
+
+########################################## 
+# Build empirical CDF from draws summing samples from two gamma distributions
+make_ecdf_from_gammas <- function(shape, scale, 
+                                  numberOfSamples = 1E6, 
+                                  hypothesis,
+                                  days_further_in_the_past) {
+  if ( hypothesis == 'gamma') {
+    draws <- rgamma(numberOfSamples, shape = shape[1], scale = scale[1]) + 
+      rgamma(numberOfSamples, shape = shape[2], scale = scale[2])
+    return(Vectorize(ecdf(draws)))
+  } 
+  else if ( hypothesis == 'beta') {
+    draws <- rgamma(numberOfSamples, shape = shape[1], scale = scale[1]) + 
+      rbeta(numberOfSamples, shape[2], scale[2]) * days_further_in_the_past
+    return(Vectorize(ecdf(draws)))
+  } 
+  else if ( hypothesis == 'weibull') {
+    draws <-
+      rgamma(numberOfSamples, shape = shape[1], scale = scale[1]) + 
+      rweibull(numberOfSamples, shape = shape[2], scale = scale[2])
+    return(Vectorize(ecdf(draws)))
+  } 
+  #else {
+  #  statement4}
+}
+
+###########################################################################33
+#########################################################################33
+### Main function to do deconvolution, get_infection_incidence_by_deconvolution.
+###  Version, no boostrap
+get_infection_incidence_by_deconvolution <- function(
+    data_subset,# unsmoothed data with two columns, value and date
+    constant_delay_distribution, # pdf for incubation + onset
+    #constant_delay_distribution_incubation = c(), # pdf for incubation only
+    #is_onset_data = F,# 不需要 and default
+    #is_local_cases = T, # 不需要 and default
+    #smooth_incidence = TRUE,# depends on the version of get_bootstrap_replicate
+    days_incl,# hyperparameter
+    #empirical_delays  = tibble(),# default
+    n_bootstrap,# hyperparameter and 50
+    days_further_in_the_past, # hyperparameter and default. this one is used in the data preprocessing as well as iterateRL
+    #days_further_in_the_past_incubation = 5, # hyperparaeter and default. what's this for: its not in our case
+    threshold_chi_squared,
+    is_sampling, 
+    max_iterations = 100) {# default verbose = FALSE
+  
+  ############### Initialization
+  data_subset <- data_subset %>%   # exclude leading zeroes
+    arrange(date) %>%
+    filter(cumsum(value) > 0)
+  
+  #data_type_subset <- unique(data_subset$data_type)[1] # 我们是n1或者n2, 只用在命名col里
+  #data_type_name <- paste0("infection_", data_type_subset) # "infection_n1" or "infection_n2", 只用在命名col里
+  
+  minimal_date <- min(data_subset$date) - days_further_in_the_past
+  maximal_date <- max(data_subset$date)
+  all_dates <- seq(minimal_date, maximal_date, by = "days")
+  
+  # nested function that doesn't need to change, get_matrix_constant_waiting_time_distr
+  delay_distribution_matrix <- get_matrix_constant_waiting_time_distr(constant_delay_distribution,all_dates)
+  initial_delta <- min(which(cumsum(constant_delay_distribution) > 0.5)) - 1 # take median value (-1 because index 1 corresponds to zero days)
+  
+  ############### Deconvolution
+  if (is_sampling == FALSE) { # not bootstrapping, just return one deconvolution result
+    ####### smoothing
+    smoothed_incidence_data <- data_subset %>%
+      complete(date = seq.Date(min(date), max(date), by = "days"), fill = list(value = 0)) %>% 
+      mutate(value = getLOESSCases(dates = date, count_data = value, days_incl=days_incl)) 
+    ####### deconvolution
+    deconvolved_infections <-  do_deconvolution(smoothed_incidence_data,
+                                                delay_distribution_matrix = delay_distribution_matrix,
+                                                days_further_in_the_past = days_further_in_the_past,# 30
+                                                initial_delta = initial_delta,# median value of gamma mixture
+                                                max_iterations = max_iterations,
+                                                threshold_chi_squared = threshold_chi_squared)  
+    deconvolved_infections <- deconvolved_infections %>% slice((days_further_in_the_past -5 + 1):n())
+    ###### Normalization
+    total_incidence <- sum(deconvolved_infections$value) #, na.rm = TRUE) do we have missing values??
+    deconvolved_infections = deconvolved_infections  %>%
+      mutate(value = 10000 * value/total_incidence)
+    ######
+    return(deconvolved_infections)
+  }
+  else if (is_sampling == TRUE){ # boostrapping, return results for each bootstrap
+    results <- list(tibble())
+    # preprocessing
+    for (bootstrap_replicate_i in 0:n_bootstrap) { 
+        if (bootstrap_replicate_i == 0) {
+        smoothed_incidence_data <- data_subset %>%
+          complete(date = seq.Date(min(date), max(date), by = "days"), fill = list(value = 0)) %>% 
+          mutate(value = getLOESSCases(dates = date, count_data = value, days_incl=days_incl)) 
+      } 
+        else if (bootstrap_replicate_i != 0){  
+        smoothed_incidence_data <- get_bootstrap_replicate(data_subset)
+      }
+      deconvolved_infections <-  do_deconvolution(smoothed_incidence_data,
+                                                  delay_distribution_matrix = delay_distribution_matrix,
+                                                  days_further_in_the_past = days_further_in_the_past,# 30
+                                                  initial_delta = initial_delta,# median value of gamma mixture
+                                                  max_iterations = max_iterations,
+                                                  threshold_chi_squared = threshold_chi_squared)  
+      deconvolved_infections <- deconvolved_infections %>% slice((days_further_in_the_past -5 + 1):n())
+      
+      ###### Normalization
+      total_incidence <- sum(deconvolved_infections$value) #, na.rm = TRUE) do we have missing values??
+      deconvolved_infections = deconvolved_infections  %>%
+        mutate(value = 10000 * value/total_incidence)
+      
+      
+      ###### return a tibble for this bootstrap
+      deconvolved_infections <- tibble(
+        date = deconvolved_infections$date,
+        value = deconvolved_infections$value,
+        replicate = bootstrap_replicate_i)
+      results <- c(results, list(deconvolved_infections)) # it returns deconvolved values as tibble with 3 columns (date, value, replicate index) for each bootstrap
+      }
+    return(results)
+  }
+} # end of function. tibbles with 3 columns date, value and replicate.
+
+########################################################################
+########################################################################
+### Function that we call in loss function
+deconvolveIncidence <- function(data_subset, # unsmoothed data with two columns, value and date
+                                # incidence_var = 'n1', 
+                                IncubationParams, # list(shape = shapeParam, scale = scaleParam) of gamma, task 1 and task 2
+                                OnsetToCountParams, # list(shape = shapeParam, scale = scaleParam) of gamma, task 1 and task 2
+                                ### if only consider one delay, put OnsetToCountParams = (shape = 0, scale = 0)
+                                # smooth_param = TRUE, 
+                                n_bootstrap = 50,# get_infection_incidence_by_deconvolution
+                                days_incl = 21, # smoothing parameter, get_infection_incidence_by_deconvolution - get_bootstrap_replicate - getLOESSCases
+                                days_further_in_the_past = 30, # deconvolution parameter specifying the maximum delay possible, get_infection_incidence_by_deconvolution 
+                                length_out = 200, ### number of values to discribe delay distribution
+                                # also to specify the range of beta distribution
+                                threshold_chi_squared = 1, # threshold for RL algorithm, iterate_RL - do_deconvolution - get_infection_incidence_by_deconvolution 
+                                hypothesis, # functional space for delay distribution, make_ecdf - get_vector_constant_waiting_time_distr - Weibull, beta....
+                                is_sampling = TRUE
+                                # block_size = 10 # block_boot_overlap_func - get_bootstrap_replicate - get_infection_incidence_by_deconvolution
+){ 
+  ####### Initialization 
+  ####### Build this parameter for get_infection_incidence_by_deconvolution, task 1 and task 2
+  constant_delay_distributions <- get_vector_constant_waiting_time_distr(IncubationParams$shape, IncubationParams$scale,OnsetToCountParams$shape, OnsetToCountParams$scale, 
+                                                                         length_out = length_out, 
+                                                                         hypothesis = hypothesis,
+                                                                         days_further_in_the_past = days_further_in_the_past)
+  # Nested function 1, get_vector_constant_waiting_time_distr
+  
+  ######### Deconvolution
+  estimatedInfections <- get_infection_incidence_by_deconvolution( 
+    data_subset,   
+    # is_local_cases = T,
+    constant_delay_distribution = constant_delay_distributions,# incubation + onset. vector of length200
+    #constant_delay_distribution_incubation = constant_delay_distributions[["Symptoms"]], # incubation only. vector 长度200, 这个对我们没用
+    max_iterations = 100, # iterate_RL - do_deconvolution - get_infection_incidence_by_deconvolution 
+    #smooth_incidence = smooth_param, # TRUE
+    #empirical_delays = tibble(),
+    n_bootstrap = n_bootstrap,
+    days_incl = days_incl,
+    days_further_in_the_past = days_further_in_the_past, 
+    threshold_chi_squared = threshold_chi_squared,
+    is_sampling = is_sampling
+  ) # 50, #verbose = FALSE)
+  
+  ######### Normalization as proportion, Normalization is no in get_infection_incidence
+  #total_incidence <- sum(data_subset$value) #, na.rm = TRUE) do we have missing values??
+  
+  #estimatedInfections = estimatedInfections  %>%
+  #  mutate(value = 10000 * value/total_incidence)
+  
+  return(estimatedInfections)  
+}
+
+###########################################################################33
+#########################################################################33
+# Import conformed case data
+
+# orig_cases: 2020-08-15 to 2021-01-20, with two columns (date value)
+orig_cases <- read_csv('ZH_case_incidence_data.csv') %>%
+  filter(date >= as_date("2020-08-15"),
+         date <= as_date("2021-01-20")) %>%
+  mutate(across(c(-date), ~ ifelse(is.na(.), 0, .)))  %>%
+  select(date, confirmed)
+#rename(confirmed = value)
+colnames(orig_cases) <- c('date','value')
+
+# # TODO new_deconv_data: 2020-08-10 to 2021-01-13, with two columns (date ,value)
+# sampling_case = deconvolveIncidence(  orig_cases, 
+#                                       #incidence_var = inc_var,
+#                                       getGammaParams(5.3, 3.2), # incubation
+#                                       getGammaParams(2.83, 2.96), # when its zero, it means consider only one delay
+#                                       n_bootstrap = 50,# get_infection_incidence_by_deconvolution
+#                                       days_incl = 21, # smoothing parameter, get_infection_incidence_by_deconvolution - get_bootstrap_replicate - getLOESSCases
+#                                       days_further_in_the_past = 30, # deconvolution parameter specifying the maximum delay possible, get_infection_incidence_by_deconvolution 
+#                                       length_out = 200, ### number of values to discribe delay distribution
+#                                       # also used to specify the range of beta distribution
+#                                       threshold_chi_squared = 1,
+#                                       hypothesis = "gamma", #
+#                                       is_sampling = TRUE
+#                                       #num_delays = 1, # number of delay distributions considered in the model
+#                                       #smooth_param = TRUE, 
+# )
+single_case = deconvolveIncidence(  orig_cases, 
+                                      #incidence_var = inc_var,
+                                      getGammaParams(5.3, 3.2), # incubation
+                                      getGammaParams(2.83, 2.96), # when its zero, it means consider only one delay
+                                      n_bootstrap = 50,# get_infection_incidence_by_deconvolution
+                                      days_incl = 21, # smoothing parameter, get_infection_incidence_by_deconvolution - get_bootstrap_replicate - getLOESSCases
+                                      days_further_in_the_past = 30, # deconvolution parameter specifying the maximum delay possible, get_infection_incidence_by_deconvolution 
+                                      length_out = 200, ### number of values to discribe delay distribution
+                                      # also used to specify the range of beta distribution
+                                      threshold_chi_squared = 1,
+                                      hypothesis = "gamma", #
+                                      is_sampling = FALSE
+                                      #num_delays = 1, # number of delay distributions considered in the model
+                                      #smooth_param = TRUE, 
+)
+
+###########################################################################33
+#########################################################################33
+#Import wastewater data
+ZH_flow_url = "ARA Werdhoelzli_flow_cases.csv"
+ZH_genes_url = "ARA Werdhoelzli_genes.csv"
+
+# raw_flow_data_ZH: 2020-01-01 to 2021-10-18, with 6 columns (we only used n1_smooth)
+raw_flow_data_ZH <- read_delim(ZH_flow_url, delim = ';',
+                               col_names = c('date', 'cases', 'cases_smooth', 
+                                             'flow', 'n1_smooth', 'n2_smooth'),
+                               col_types = cols(date = col_date(format = '')),
+                               skip = 1) 
+# raw_gene_data_ZH: 2020-07-05 to 2021-04-20, with 3 columns (we dont use this data)
+raw_gene_data_ZH <- read_delim(ZH_genes_url, delim = ';',
+                               col_names = c('date', 'n1', 'n2'),
+                               col_types = cols(date = col_date(format = '')),
+                               skip = 1) 
+# raw_data_ZH: 2020-09-03 to 2021-01-19 with 11 columns ( add orig_data and region columns)
+raw_data_ZH <- raw_flow_data_ZH %>%
+  left_join(raw_gene_data_ZH, c('date')) %>%
+  filter(!is.na(n1),
+         date >= as_date("2020-09-01"),
+         date <= as_date("2021-01-20"),
+         date != as_date("2020-10-29")) %>%
+  mutate(orig_data = TRUE) %>% # of no use to us
+  complete(date = seq.Date(min(date), max(date), by = 'days')) %>%
+  mutate(across(where(is.numeric), ~ zoo::na.approx(.x, na.rm = F) )) %>%
+  mutate(region = 'ZH') # of no use to us
+
+# ww_data: 2020-09-03 to 2021-01-19 with 13 columns (add normalized n1 and n2)
+# Normalizatioion of wastewater# TODO
+norm_min <- min(raw_data_ZH$n1, raw_data_ZH$n2)
+ww_data = bind_rows(raw_data_ZH)  %>%
+  mutate(norm_n1 = n1/norm_min,
+         norm_n2 = n2/norm_min)
+
+# new_ww: 2020-09-03 to 2021-01-19 with 2 columns, data and normalized n1 (unsmoothed)
+new_ww<-ww_data[c(1,11)] 
+colnames(new_ww) <- c('date','value')
+
+####################################3
+# Dataframe input in the optimization algorithm with 3 columns, date + value + datatype
+# Deconvoluted confirmed cases:  2020-08-10 to 2021-01-13
+# Unsmoothed_n1 wastewater data: 2020-09-03 to 2021-01-19; After deconvolution with days_further_in_the_past = 30, 2020-08-29 to 2021-01-14
+new_deconv_data$datatype<-'confirmed cases'
+new_ww$datatype<-'wastewater'
+combine<-bind_rows(new_ww, new_deconv_data)
+
+##################################################################3
+###################################################################
+#########Loss function, beta
+wholeloss<-function(df, par){
+  
+  waste<-df[which(df$datatype=='wastewater'),]      
+  caseinfect<-df[which(df$datatype=='confirmed cases'),]
+  
+  ww_infect = deconvolveIncidence(waste, 
+                                  #incidence_var = inc_var,
+                                  IncubationParams=list(shape = 0, scale = 0),
+                                  #IncubationParams = getGammaParams(5.3, 3.2),
+                                  OnsetToCountParams = list(shape = par[1], scale = par[2]), # incubation
+                                  n_bootstrap = 50,# get_infection_incidence_by_deconvolution
+                                  days_incl = 21, # smoothing parameter, get_infection_incidence_by_deconvolution - get_bootstrap_replicate - getLOESSCases
+                                  days_further_in_the_past = 30, # deconvolution parameter specifying the maximum delay possible, get_infection_incidence_by_deconvolution 
+                                  threshold_chi_squared = 1,
+                                  hypothesis="beta",
+                                  is_sampling = FALSE
+                                  #smooth_param = TRUE, 
+  )
+  result = compareTracesRMSE(ww_infect, caseinfect)   #call our rmse lose 
+  return(result)
+}
+
+###### nested function in the loss function
+compareTracesRMSE <- function(infect_i, infect_j){
+  compare_df = infect_i %>%
+    left_join(infect_j, by = 'date', suffix = c(".i", ".j")) %>%
+    mutate(se = (value.i - value.j)^2)
+  
+  se = compare_df %>% pull(se)
+  rmse = sqrt(sum(se, na.rm = T)/length(infect_i$date))
+  
+  return(rmse)
+}
+
+###########################################################################33
+#########################################################################33
+### Optimization
+opt_input <- read_csv('optimization_input.csv')
+par<-as.matrix(c(2,3))
+optim(par=par, fn=wholeloss, df=opt_input) #method="L-BFGS-B", lower=c(0, 0))
